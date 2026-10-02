@@ -72,7 +72,7 @@ SOFTWARE.
 #endif
 
 #ifndef ADMPATH
-#define ADMPATH "/usr/adm/X%smsgs"
+#define ADMPATH "/data/user/0/app.gamenative/files/gamescope/adm/X%smsgs"
 #endif
 
 #ifdef RLIMIT_DATA
@@ -263,11 +263,6 @@ OsInit(void)
 #endif
         }
 #endif /* !XQUARTZ */
-
-#if !defined(WIN32) || defined(__CYGWIN__)
-        if (getpgrp() == 0)
-            setpgid(0, 0);
-#endif
 
 #ifdef RLIMIT_DATA
         if (limitDataSpace >= 0) {
