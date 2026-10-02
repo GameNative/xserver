@@ -1,0 +1,45 @@
+# Meson cross file template: aarch64-linux-android (API 28) against the aarch64
+# termux prefix (build-time sysroot for X libs; runtime resolution is
+# LD_LIBRARY_PATH per the GameNative payload model — no rpath, no patchelf).
+# Mirrors gamescope/android/cross/aarch64-linux-android.txt.
+#
+# This file is a template. android/build-xwayland.sh fills in the NDK binary
+# directory, the termux prefix and this tree's own path, then writes the result
+# to android/cross/aarch64-linux-android.txt, which is the file `--cross-file`
+# names in that script. Generate it through the script rather than editing the
+# output.
+
+[binaries]
+c          = '@NDK_BIN@/aarch64-linux-android28-clang'
+ar         = '@NDK_BIN@/llvm-ar'
+strip      = '@NDK_BIN@/llvm-strip'
+nm         = '@NDK_BIN@/llvm-nm'
+pkgconfig  = 'pkg-config'
+# host (build-machine) tools — never the aarch64 ones from the prefix
+wayland-scanner = '/usr/bin/wayland-scanner'
+
+[host_machine]
+system     = 'linux'
+cpu_family = 'aarch64'
+cpu        = 'armv8-a'
+endian     = 'little'
+
+[built-in options]
+# -DANDROID: gates our stubmain log-file patch.
+# -DFNDELAY=O_NDELAY: bionic has no FNDELAY.
+# -fcommon: xserver pre-C99 tentative definitions (same as termux).
+c_args   = ['-g0', '-O2', '-fPIC', '-fcommon', '-DANDROID',
+            '-DFNDELAY=O_NDELAY', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES',
+            '-Drindex=strrchr',
+            '-Wno-int-to-pointer-cast', '-Wno-implicit-function-declaration',
+            '-idirafter', '@DEPS@/include']
+# -landroid-shmem: MIT-SHM (SysV shm emulation over ashmem); bionic has no
+# SysV IPC.
+c_link_args   = ['-L@DEPS@/lib',
+                 '-Wl,-z,max-page-size=16384', '-landroid-shmem']
+
+[properties]
+# Overlay prefix first: xtrans (header-only) installed by android/deps/.
+pkg_config_libdir = ['@REPO_DIR@/android/deps/prefix/lib/pkgconfig',
+                     '@DEPS@/lib/pkgconfig',
+                     '@DEPS@/share/pkgconfig']

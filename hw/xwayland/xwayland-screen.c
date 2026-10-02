@@ -26,9 +26,12 @@
 #include <xwayland-config.h>
 
 #include <math.h>
+#include <limits.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 
 #ifdef XWL_HAS_GLAMOR
 #include <glamor.h>
@@ -729,17 +732,148 @@ void xwl_surface_damage(struct xwl_screen *xwl_screen,
         wl_surface_damage(surface, x, y, width, height);
 }
 
+/* gamenative: bound the Wayland connection itself.
+ *
+ * xwl_screen_roundtrip() carries a deadline on its own poll, but the deadlock
+ * this startup window hit is a syscall parked *outside* that poll: the flush
+ * libwayland performs when it pushes requests out (wl_display_flush /
+ * wl_display_dispatch) and any blocking recv of a reply both sit on the display
+ * descriptor, not in the loop that holds the deadline. A compositor that stops
+ * draining the socket therefore pins Xwayland in the read/write before it ever
+ * reaches -displayfd, and the roundtrip bound cannot fire because the thread is
+ * not in the roundtrip.
+ *
+ * Bound the descriptor the same way the gndrm channels are bounded: a read or
+ * write with no progress returns EAGAIN instead of blocking forever. libwayland
+ * treats an EAGAIN flush as "retry after poll" and an EAGAIN read as "no
+ * events", so the healthy path is unchanged; a wedged peer now surfaces as
+ * EAGAIN to the bounded startup waits and Xwayland continues (glamor disabled
+ * if a GPU wait failed) so it still signals ready. */
+#define XWL_WL_SOCKET_TIMEOUT_SEC 5
+
+static void
+xwl_bound_display_socket(struct wl_display *wl_dpy)
+{
+    struct timeval tv = { .tv_sec = XWL_WL_SOCKET_TIMEOUT_SEC, .tv_usec = 0 };
+    int fd = wl_display_get_fd(wl_dpy);
+
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+/* gamenative: a startup roundtrip must not be able to pin Xwayland forever.
+ *
+ * Every Wayland wait during initialisation goes through xwl_screen_roundtrip():
+ * the compositor's globals (wl_output, wl_seat), the wl_drm/linux-dmabuf
+ * handshake and the EGL/glamor gbm device setup all rely on it. If the
+ * compositor stops answering a wl_display.sync — or the event that the loop is
+ * draining never arrives — the blocking wl_display_roundtrip() wedges the main
+ * thread before Xwayland can write its -displayfd, and the compositor (whose
+ * whole startup wait is servicing the same Wayland loop) waits on it forever.
+ *
+ * Keep the sync-and-wait semantics for the healthy path, but bound each
+ * roundtrip (and the whole drain loop) so a missing reply or a compositor event
+ * that never arrives is named and skipped rather than fatal. */
+#define XWL_STARTUP_ROUNDTRIP_TIMEOUT_MS 5000
+#define XWL_STARTUP_ROUNDTRIP_MAX_MS 10000
+
+static int64_t
+xwl_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void
+xwl_roundtrip_done(void *data, struct wl_callback *callback, uint32_t time)
+{
+    (void)time;
+    *(int *)data = 1;
+    wl_callback_destroy(callback);
+}
+
+static const struct wl_callback_listener xwl_roundtrip_listener = {
+    .done = xwl_roundtrip_done,
+};
+
+/* One wl_display.sync roundtrip, bounded by timeout_ms.
+ *  1 = replied, 0 = timed out, -1 = connection error. */
+static int
+xwl_screen_roundtrip_timeout(struct xwl_screen *xwl_screen, int timeout_ms)
+{
+    struct wl_display *wl_dpy = xwl_screen->display;
+    int fd = wl_display_get_fd(wl_dpy);
+    int64_t deadline = xwl_now_ms() + timeout_ms;
+    struct wl_callback *callback;
+    int done = 0;
+
+    callback = wl_display_sync(wl_dpy);
+    if (callback == NULL)
+        return -1;
+    wl_callback_add_listener(callback, &xwl_roundtrip_listener, &done);
+
+    while (!done) {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        int64_t remaining = deadline - xwl_now_ms();
+        int ret;
+
+        if (wl_display_dispatch_pending(wl_dpy) < 0)
+            return -1;
+        if (wl_display_flush(wl_dpy) < 0 && errno != EAGAIN)
+            return -1;
+        if (done)
+            break;
+
+        if (remaining <= 0)
+            return 0;
+        if (remaining > INT_MAX)
+            remaining = INT_MAX;
+
+        ret = xserver_poll(&pfd, 1, (int)remaining);
+        if (ret < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (ret == 0)
+            return 0;
+
+        if (wl_display_dispatch(wl_dpy) < 0)
+            return -1;
+    }
+
+    return 1;
+}
+
 void
 xwl_screen_roundtrip(struct xwl_screen *xwl_screen)
 {
-    int ret;
+    int64_t deadline = xwl_now_ms() + XWL_STARTUP_ROUNDTRIP_MAX_MS;
+    int ret = 1;
+    Bool timed_out = FALSE;
 
     do {
-        ret = wl_display_roundtrip(xwl_screen->display);
-    } while (ret >= 0 && xwl_screen->expecting_event);
+        int64_t remaining = deadline - xwl_now_ms();
 
-    if (ret < 0)
-        xwl_give_up("could not connect to wayland server\n");
+        if (remaining <= 0) {
+            timed_out = TRUE;
+            break;
+        }
+        if (remaining > XWL_STARTUP_ROUNDTRIP_TIMEOUT_MS)
+            remaining = XWL_STARTUP_ROUNDTRIP_TIMEOUT_MS;
+
+        ret = xwl_screen_roundtrip_timeout(xwl_screen, (int)remaining);
+        if (ret < 0)
+            xwl_give_up("could not connect to wayland server\n");
+        if (ret == 0)
+            timed_out = TRUE;
+    } while (xwl_screen->expecting_event && ret > 0);
+
+    if (timed_out || xwl_screen->expecting_event)
+        ErrorF("xwayland: startup Wayland roundtrip did not settle within %d ms "
+               "(expecting_event=%d); continuing so Xwayland can signal ready\n",
+               XWL_STARTUP_ROUNDTRIP_MAX_MS, xwl_screen->expecting_event);
 }
 
 static int
@@ -990,6 +1124,8 @@ xwl_screen_init(ScreenPtr pScreen, int argc, char **argv)
         ErrorF("could not connect to wayland server\n");
         return FALSE;
     }
+
+    xwl_bound_display_socket(xwl_screen->display);
 
 #ifdef XWL_HAS_GLAMOR
     if (xwl_screen->glamor && !xwl_glamor_init_gbm(xwl_screen)) {

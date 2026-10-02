@@ -1,0 +1,34 @@
+--- Xtranssock.c.orig
++++ Xtranssock.c
+@@ -232,8 +232,29 @@
+ 
+ 
+ #if defined(X11_t)
+-#define UNIX_PATH "/tmp/.X11-unix/X"
+-#define UNIX_DIR "/tmp/.X11-unix"
++#include <limits.h>
++#include <stdlib.h>
++/* GameNative: bionic has no writable /tmp. The container's libxcb dials
++   $TMPDIR/.X11-unix/X<n> (winlator build), so the server side must create
++   its listener under TMPDIR as well — both inherit the launcher's TMPDIR. */
++static const char *gn_trans_unix_dir(void)
++{
++    static char buf[PATH_MAX];
++    const char *tmpdir = getenv("TMPDIR");
++    snprintf(buf, sizeof(buf), "%s/.X11-unix",
++             (tmpdir && *tmpdir) ? tmpdir : "/tmp");
++    return buf;
++}
++static const char *gn_trans_unix_path(void)
++{
++    static char buf[PATH_MAX];
++    const char *tmpdir = getenv("TMPDIR");
++    snprintf(buf, sizeof(buf), "%s/.X11-unix/X",
++             (tmpdir && *tmpdir) ? tmpdir : "/tmp");
++    return buf;
++}
++#define UNIX_DIR (gn_trans_unix_dir())
++#define UNIX_PATH (gn_trans_unix_path())
+ #endif /* X11_t */
+ #if defined(XIM_t)
+ #define UNIX_PATH "/tmp/.XIM-unix/XIM"
