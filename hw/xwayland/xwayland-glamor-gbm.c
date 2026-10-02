@@ -33,6 +33,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <poll.h>
+#include <stdlib.h>
 #ifdef DRI3
 #include <sys/eventfd.h>
 #endif /* DRI3 */
@@ -142,6 +143,27 @@ gbm_format_for_depth(int depth, int gles)
     case 32:
         return GBM_FORMAT_ARGB8888;
     }
+}
+
+/* gamenative-drm: the userspace KMS device.
+ *
+ * With GAMENATIVE_DRM_SOCKET set, libgndrm_shim.so is preloaded and every
+ * /dev/dri node open is a SOCK_SEQPACKET to the in-app daemon serving a
+ * render-node surface. drmGetDevice2()/drmGetNodeTypeFromFd() describe a node
+ * through /sys on a real fd and cannot describe a socket, so the render node
+ * is declared by environment instead of probed. Returns the node path to hand
+ * to open(), or NULL when the device is a real one.
+ */
+static const char *
+xwl_gamenative_render_node(void)
+{
+    const char *sock = getenv("GAMENATIVE_DRM_SOCKET");
+    const char *node;
+
+    if (!sock || !*sock)
+        return NULL;
+    node = getenv("GAMENATIVE_DRM_NODE");
+    return (node && *node) ? node : "/dev/dri/renderD128";
 }
 
 static PixmapPtr
@@ -1264,6 +1286,30 @@ xwl_drm_handle_device(void *data, struct wl_drm *drm, const char *device)
    struct xwl_screen *xwl_screen = data;
    struct xwl_gbm_private *xwl_gbm = xwl_gbm_get(xwl_screen);
    drm_magic_t magic;
+   const char *gn_node = xwl_gamenative_render_node();
+
+   if (gn_node) {
+       /* gamenative-drm: the device is the userspace daemon; the compositor's
+        * wl_drm device name is meaningless (there is no real node), so open the
+        * shim-intercepted render node instead of probing it. */
+       xwl_gbm->device_name = strdup(gn_node);
+       if (!xwl_gbm->device_name) {
+           xwl_glamor_gbm_cleanup(xwl_screen);
+           xwl_screen->expecting_event--;
+           return;
+       }
+       xwl_gbm->drm_fd = open(xwl_gbm->device_name, O_RDWR | O_CLOEXEC);
+       if (xwl_gbm->drm_fd == -1) {
+           ErrorF("wayland-egl: could not open %s (%s)\n",
+                  xwl_gbm->device_name, strerror(errno));
+           xwl_glamor_gbm_cleanup(xwl_screen);
+           xwl_screen->expecting_event--;
+           return;
+       }
+       xwl_gbm->fd_render_node = TRUE;
+       xwl_screen->expecting_event--;
+       return;
+   }
 
    xwl_gbm->device_name = get_render_node_path(device);
    if (!xwl_gbm->device_name) {
@@ -1655,10 +1701,25 @@ xwl_glamor_gbm_init_egl(struct xwl_screen *xwl_screen)
     EGLint major, minor;
     const GLubyte *renderer;
     const char *gbm_backend_name, *egl_vendor;
+    const char *gn_node = xwl_gamenative_render_node();
 
-    if (!xwl_gbm->drm && !xwl_glamor_gbm_init_main_dev(xwl_screen))
+    if (gn_node) {
+        /* gamenative-drm: acquire the userspace device's render node directly;
+         * there is no compositor-advertised DRM device to resolve (the node is
+         * a socket served by the daemon). */
+        xwl_gbm->device_name = strdup(gn_node);
+        if (!xwl_gbm->device_name)
+            return FALSE;
+        xwl_gbm->drm_fd = open(xwl_gbm->device_name, O_RDWR | O_CLOEXEC);
+        if (xwl_gbm->drm_fd < 0) {
+            ErrorF("wayland-egl: could not open %s (%s)\n",
+                   xwl_gbm->device_name, strerror(errno));
+            return FALSE;
+        }
+        xwl_gbm->fd_render_node = TRUE;
+    } else if (!xwl_gbm->drm && !xwl_glamor_gbm_init_main_dev(xwl_screen)) {
         return FALSE;
-
+    }
     if (!xwl_gbm->fd_render_node && !xwl_gbm->drm_authenticated) {
         ErrorF("Failed to get wl_drm, disabling Glamor and DRI3\n");
 	return FALSE;

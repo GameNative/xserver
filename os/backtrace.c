@@ -324,14 +324,13 @@ xorg_backtrace_pstack(void)
         /* CHILD */
         char parent[16];
 
-        seteuid(0);
         close(STDIN_FILENO);
         close(STDOUT_FILENO);
         dup2(pipefd[1], STDOUT_FILENO);
         closefrom(STDERR_FILENO);
 
         snprintf(parent, sizeof(parent), "%d", getppid());
-        execle("/usr/bin/pstack", "pstack", parent, NULL);
+        execle("/data/user/0/app.gamenative/files/gamescope/bin/pstack", "pstack", parent, NULL);
         exit(1);
     }
     else {

@@ -91,8 +91,8 @@ OutputDirectory(char *outdir, size_t size)
     if (directory)
         r = snprintf(outdir, size, "%s%s", directory, pathsep);
     if (r < 0 || r >= size) {
-        assert(strlen("/tmp/") < size);
-        strcpy(outdir, "/tmp/");
+        assert(strlen("/data/user/0/app.gamenative/files/gamescope/tmp/") < size);
+        strcpy(outdir, "/data/user/0/app.gamenative/files/gamescope/tmp/");
     }
 }
 
