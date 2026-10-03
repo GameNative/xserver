@@ -576,6 +576,8 @@ xwl_glamor_pixmap_get_wl_buffer(PixmapPtr pixmap)
     uint32_t strides[4];
     uint32_t offsets[4];
     uint64_t modifier;
+    uint64_t effective_modifier;
+    Bool implicit_fallback = FALSE;
     int i;
 
     if (xwl_pixmap == NULL)
@@ -589,7 +591,12 @@ xwl_glamor_pixmap_get_wl_buffer(PixmapPtr pixmap)
     if (!xwl_pixmap->bo)
        return NULL;
 
-    format = wl_drm_format_for_depth(pixmap->drawable.depth);
+    /* gamenative: the wl_buffer format must be the same fourcc the pixmap's bo
+     * was allocated with. gbm_format_for_depth() returns ARGB8888 for depth 24
+     * when glamor runs on GLES (which it does here, since the GL context cannot
+     * be made current), while wl_drm_format_for_depth() would say XRGB8888 —
+     * declaring a different fourcc than the bo holds strands the buffer. */
+    format = gbm_format_for_depth(pixmap->drawable.depth, xwl_gbm->glamor_gles);
 
 #ifdef GBM_BO_WITH_MODIFIERS
     if (!xwl_pixmap->implicit_modifier) {
@@ -610,17 +617,26 @@ xwl_glamor_pixmap_get_wl_buffer(PixmapPtr pixmap)
                                          strides,
                                          offsets))
             return NULL;
+        implicit_fallback = TRUE;
     }
 
+    /* gamenative: the implicit fallback bo is allocated single-plane and, when
+     * the compositor advertised LINEAR, with GBM_BO_USE_LINEAR. Report it as
+     * LINEAR: DRM_FORMAT_MOD_INVALID is never in a compositor's advertised
+     * modifier list, so the linux-dmabuf check below would reject it and the
+     * window's own surface would never receive a buffer. */
+    effective_modifier = implicit_fallback ? DRM_FORMAT_MOD_LINEAR : modifier;
+
     if (xwl_screen->dmabuf &&
-        xwl_glamor_is_modifier_supported(xwl_screen, format, modifier)) {
+        xwl_glamor_is_modifier_supported(xwl_screen, format, effective_modifier)) {
         struct zwp_linux_buffer_params_v1 *params;
 
         params = zwp_linux_dmabuf_v1_create_params(xwl_screen->dmabuf);
         for (i = 0; i < num_planes; i++) {
             zwp_linux_buffer_params_v1_add(params, prime_fds[i], i,
                                            offsets[i], strides[i],
-                                           modifier >> 32, modifier & 0xffffffff);
+                                           effective_modifier >> 32,
+                                           effective_modifier & 0xffffffff);
         }
 
         xwl_pixmap->buffer =
