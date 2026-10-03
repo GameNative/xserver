@@ -76,6 +76,15 @@ rm -rf "$STAGE/share/X11/xkb/compiled"
 # keep empty runtime dirs in the tarball
 touch "$STAGE/tmp/xkb/.keep"
 
+# --- permission normalization -------------------------------------------------
+# The staged tree inherits its modes from the termux prefix (dirs 0700, files
+# 0600, libs 0700) and tar stores them verbatim, so the payload could ship a
+# read-only, owner-only tree. Normalize: directories 0755, regular files 0644,
+# executable files 0755. Symlinks are left untouched.
+find "$STAGE" -type d -exec chmod 0755 {} +
+find "$STAGE" -type f -perm /111 -exec chmod 0755 {} +
+find "$STAGE" -type f ! -perm /111 -exec chmod 0644 {} +
+
 # --- archive ------------------------------------------------------------------
 rm -f "$OUT_ASSETS"/xwayland-gamenative-*.tzst
 tar --owner=0 --group=0 --numeric-owner -C "$STAGE" -cf - bin lib share tmp \
