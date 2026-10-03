@@ -776,9 +776,21 @@ xwl_present_check_flip(RRCrtcPtr crtc,
     if ( !RegionEqual(&present_window->winSize, &toplvl_window->winSize) )
         return FALSE;
 
-    /* Can't flip if window clipped by children */
-    if (!RegionEqual(&present_window->clipList, &present_window->winSize))
-        return FALSE;
+    /*
+     * gamenative: upstream refuses to flip when the presenting toplevel's
+     * clipList is not equal to its winSize, i.e. when some child clips it:
+     *
+     *   if (!RegionEqual(&present_window->clipList, &present_window->winSize))
+     *       return FALSE;
+     *
+     * In rootless Xwayland that guard can never pass. gamenative sets
+     * root_clip_mode = ROOT_CLIP_INPUT_ONLY (see xwayland-screen.c), and
+     * SetRootClip() in INPUT_ONLY mode empties the root borderClip and skips
+     * child revalidation (dix/window.c), so the presenting toplevel's clipList
+     * is always empty even though nothing occludes it. There is no X-side
+     * occluder for the guard to protect against here: the Wayland compositor
+     * alone decides what is visible. The guard is therefore omitted.
+     */
 
     /* Can't flip if the window pixmap doesn't match the xwl_window parent
      * window's, e.g. because a client redirected this window or one of its
