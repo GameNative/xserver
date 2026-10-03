@@ -191,6 +191,25 @@ xwl_dmabuf_get_formats(struct xwl_format *format_array, int format_array_len,
     return TRUE;
 }
 
+/* gamenative: the DRM device is not always identifiable.
+ *
+ * On Android the buffer-producing device may be a userspace daemon reached
+ * over a socket (gamenative-drm), so drmGetDeviceFromDevId()/drmGetDevice2()
+ * cannot describe it through /sys and the drmDevice* is NULL on one or both
+ * sides of the comparison. In that case device identity is not a discriminator
+ * we can use: match the tranche on format/modifier alone instead of reporting
+ * that the compositor supports nothing, which would leave every window buffer
+ * un-attachable (xwl_pixmap_get_wl_buffer() returns NULL). When both devices
+ * are resolvable the kernel identity is still required, exactly as upstream.
+ */
+static Bool
+xwl_dmabuf_device_matches(const drmDevice *a, const drmDevice *b)
+{
+    if (a == NULL || b == NULL)
+        return TRUE;
+    return drmDevicesEqual((drmDevice *)a, (drmDevice *)b);
+}
+
 static Bool
 xwl_dmabuf_get_formats_for_device(struct xwl_dmabuf_feedback *xwl_feedback, drmDevice *device,
                                   CARD32 *num_formats, CARD32 **formats)
@@ -200,7 +219,7 @@ xwl_dmabuf_get_formats_for_device(struct xwl_dmabuf_feedback *xwl_feedback, drmD
 
     /* go through all matching sets of tranches for the window's device */
     for (int i = 0; i < xwl_feedback->dev_formats_len; i++) {
-        if (drmDevicesEqual(xwl_feedback->dev_formats[i].drm_dev, device)) {
+        if (xwl_dmabuf_device_matches(xwl_feedback->dev_formats[i].drm_dev, device)) {
             struct xwl_device_formats *dev_formats = &xwl_feedback->dev_formats[i];
 
             /* Append the formats from this tranche to the list */
@@ -301,7 +320,7 @@ xwl_dmabuf_get_modifiers_for_device(struct xwl_dmabuf_feedback *feedback,
     for (int i = 0; i < feedback->dev_formats_len; i++) {
         struct xwl_device_formats *dev_formats = &feedback->dev_formats[i];
 
-        if (drmDevicesEqual(dev_formats->drm_dev, device) &&
+        if (xwl_dmabuf_device_matches(dev_formats->drm_dev, device) &&
             xwl_dmabuf_get_modifiers_for_format(dev_formats->formats,
                                                 dev_formats->num_formats,
                                                 format, num_modifiers, modifiers)) {
@@ -568,8 +587,16 @@ xwl_dmabuf_feedback_tranche_done(void *data,
      */
 
     if (xwl_feedback->tmp_tranche.drm_dev == NULL) {
-        xwl_device_formats_destroy(&xwl_feedback->tmp_tranche);
-        goto out;
+        /* gamenative: keep the tranche even though the device could not be
+         * resolved. On Android the device may be a userspace daemon reached over
+         * a socket (gamenative-drm), so drmGetDeviceFromDevId() cannot describe
+         * it and drm_dev is NULL. Discarding the tranche here empties the format
+         * list, which makes xwl_glamor_get_modifiers() report nothing, forces
+         * every window buffer to be allocated with DRM_FORMAT_MOD_INVALID, and
+         * leaves xwl_pixmap_get_wl_buffer() unable to attach a buffer. The
+         * formats/modifiers the compositor sent are still valid data; retain
+         * them and let xwl_dmabuf_device_matches() decide matching. */
+        goto append;
     }
 
     /*
@@ -581,7 +608,7 @@ xwl_dmabuf_feedback_tranche_done(void *data,
     for (int i = 0; i < xwl_feedback->dev_formats_len; i++) {
         tranche = &xwl_feedback->dev_formats[i];
         if (tranche->supports_scanout == xwl_feedback->tmp_tranche.supports_scanout &&
-            drmDevicesEqual(tranche->drm_dev, xwl_feedback->tmp_tranche.drm_dev)) {
+            xwl_dmabuf_device_matches(tranche->drm_dev, xwl_feedback->tmp_tranche.drm_dev)) {
             appended = TRUE;
 
             /* Add all format/mods to this tranche */
@@ -594,6 +621,7 @@ xwl_dmabuf_feedback_tranche_done(void *data,
         }
     }
 
+append:
     if (!appended) {
         xwl_feedback->dev_formats_len++;
         xwl_feedback->dev_formats = xnfrealloc(xwl_feedback->dev_formats,
@@ -606,7 +634,6 @@ xwl_dmabuf_feedback_tranche_done(void *data,
                sizeof(struct xwl_device_formats));
     }
 
-out:
     /* reset the tranche */
     memset(&xwl_feedback->tmp_tranche, 0, sizeof(struct xwl_device_formats));
 }
