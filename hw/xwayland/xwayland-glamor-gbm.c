@@ -1803,6 +1803,25 @@ xwl_glamor_gbm_init_egl(struct xwl_screen *xwl_screen)
     }
     /* NVIDIA driver does not support implicit sync */
     xwl_gbm->implicit_sync = !strstr(egl_vendor, "NVIDIA");
+    /* gamenative-drm: the window buffers are the daemon's pool
+     * AHardwareBuffers, rendered by a driver that attaches no fence to the
+     * dma-buf (zink on Turnip/KGSL), and explicit sync is off (no timeline
+     * syncobjs on the render node). Nothing orders the compositor's scan-out
+     * after glamor's rendering, so treat implicit sync as unsupported: every
+     * commit then waits for the GPU first (xwl_window_handle_pixmap_sync).
+     * XWAYLAND_GN_NO_IMPLICIT_SYNC=0 keeps the old assumption, =1 forces this
+     * on any device. */
+    {
+        const char *force = getenv("XWAYLAND_GN_NO_IMPLICIT_SYNC");
+        Bool off = force && *force ? strcmp(force, "0") != 0
+                                   : xwl_gamenative_render_node() != NULL;
+
+        if (off && xwl_gbm->implicit_sync) {
+            xwl_gbm->implicit_sync = FALSE;
+            LogMessage(X_INFO, "glamor: implicit sync off (gamenative-drm): "
+                       "finishing GPU work before each commit\n");
+        }
+    }
 #ifdef DRI3
     if (xwl_gbm_supports_syncobjs(xwl_screen) &&
         epoxy_has_egl_extension(xwl_screen->egl_display,
