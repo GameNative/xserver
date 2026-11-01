@@ -135,7 +135,8 @@ Equipment Corporation.
 #endif
 
 /* gamenative trace hook (Xwayland defines it; weak elsewhere). */
-extern void xwl_trace_put_image(DrawablePtr, const char *) __attribute__((weak));
+extern void xwl_trace_put_image(DrawablePtr, const char *, int, int, int, int, int, int)
+    __attribute__((weak));
 
 #define mskcnt ((MAXCLIENTS + 31) / 32)
 #define BITMASK(i) (1U << ((i) & 31))
@@ -2095,7 +2096,8 @@ ProcPutImage(ClientPtr client)
     VALIDATE_DRAWABLE_AND_GC(stuff->drawable, pDraw, DixWriteAccess);
     /* gamenative trace hook: defined by Xwayland only. */
     if (xwl_trace_put_image)
-        xwl_trace_put_image(pDraw, "PutImage");
+        xwl_trace_put_image(pDraw, "PutImage", stuff->dstX, stuff->dstY, stuff->width,
+                            stuff->height, stuff->format, stuff->depth);
     if (stuff->format == XYBitmap) {
         if ((stuff->depth != 1) ||
             (stuff->leftPad >= (unsigned int) screenInfo.bitmapScanlinePad))

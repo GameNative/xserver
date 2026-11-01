@@ -96,12 +96,13 @@ xwl_gn_count(struct xorg_list *list)
     return n;
 }
 
-/* Called from ProcPutImage / ProcShmPutImage (weak symbol there). */
+/* Called from ProcPutImage / ProcShmPutImage (weak symbol there): one compact
+ * line per request on a window (not rate-limited), and the request is
+ * accumulated for the next commit's line. */
 void
-xwl_trace_put_image(DrawablePtr drawable, const char *what)
+xwl_trace_put_image(DrawablePtr drawable, const char *what, int x, int y,
+                    int w, int h, int format, int depth)
 {
-    static int count;
-    static CARD32 second;
     struct xwl_window *xwl_window;
     struct xwl_window_buffer *b;
     PixmapPtr pixmap;
@@ -110,17 +111,40 @@ xwl_trace_put_image(DrawablePtr drawable, const char *what)
     if (!xwl_gn_trace_on() || drawable->type != DRAWABLE_WINDOW)
         return;
     xwl_window = xwl_window_from_window((WindowPtr) drawable);
-    if (!xwl_window || !xwl_gn_trace_rate(&count, &second))
+    if (!xwl_window)
         return;
     pixmap = (*drawable->pScreen->GetWindowPixmap) ((WindowPtr) drawable);
     xorg_list_for_each_entry(b, &xwl_window->window_buffers_unavailable, link_buffer)
         if (b->pixmap == pixmap)
             held = TRUE;
-    ErrorF("gn-trace: %s win=0x%x target_pixmap=%p held_by_compositor=%d "
-           "buffers available=%d unavailable=%d\n", what,
-           (unsigned) ((WindowPtr) drawable)->drawable.id, (void *) pixmap, held,
-           xwl_gn_count(&xwl_window->window_buffers_available),
-           xwl_gn_count(&xwl_window->window_buffers_unavailable));
+    if (xwl_window->gn_puts++ == 0) {
+        xwl_window->gn_put_box.x1 = x;
+        xwl_window->gn_put_box.y1 = y;
+        xwl_window->gn_put_box.x2 = x + w;
+        xwl_window->gn_put_box.y2 = y + h;
+    } else {
+        xwl_window->gn_put_box.x1 = min(xwl_window->gn_put_box.x1, x);
+        xwl_window->gn_put_box.y1 = min(xwl_window->gn_put_box.y1, y);
+        xwl_window->gn_put_box.x2 = max(xwl_window->gn_put_box.x2, x + w);
+        xwl_window->gn_put_box.y2 = max(xwl_window->gn_put_box.y2, y + h);
+    }
+    ErrorF("gn-trace: t=%u %s d=0x%x %d,%d %dx%d fmt=%d depth=%d pixmap=%p held=%d\n",
+           (unsigned) GetTimeInMillis(), what, (unsigned) drawable->id, x, y, w, h,
+           format, depth, (void *) pixmap, held);
+}
+
+/* At each attach/commit of a window buffer: the PutImage requests since the
+ * previous commit (count and union of rects). Not rate-limited. */
+void
+xwl_gn_trace_commit(struct xwl_window *xwl_window, PixmapPtr pixmap, void *wl_buffer)
+{
+    if (!xwl_gn_trace_on())
+        return;
+    ErrorF("gn-trace: t=%u commit pixmap=%p wl_buffer=%p puts=%d union=%d,%d-%d,%d\n",
+           (unsigned) GetTimeInMillis(), (void *) pixmap, wl_buffer, xwl_window->gn_puts,
+           xwl_window->gn_put_box.x1, xwl_window->gn_put_box.y1,
+           xwl_window->gn_put_box.x2, xwl_window->gn_put_box.y2);
+    xwl_window->gn_puts = 0;
 }
 
 static void

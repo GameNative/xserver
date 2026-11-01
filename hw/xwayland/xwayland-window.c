@@ -2049,14 +2049,7 @@ xwl_window_attach_buffer(struct xwl_window *xwl_window)
     }
 
     wl_surface_attach(xwl_window->surface, buffer, 0, 0);
-    if (xwl_gn_trace_on()) {
-        static int count;
-        static CARD32 second;
-
-        if (xwl_gn_trace_rate(&count, &second))
-            ErrorF("gn-trace: post_damage attach pixmap=%p wl_buffer=%p\n",
-                   (void *) pixmap, (void *) buffer);
-    }
+    xwl_gn_trace_commit(xwl_window, pixmap, buffer);
 
     /* Arbitrary limit to try to avoid flooding the Wayland
      * connection. If we flood it too much anyway, this could

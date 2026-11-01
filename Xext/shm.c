@@ -97,7 +97,8 @@ in this Software without prior written authorization from The Open Group.
 #include "extinit.h"
 
 /* gamenative trace hook (Xwayland defines it; weak elsewhere). */
-extern void xwl_trace_put_image(DrawablePtr, const char *) __attribute__((weak));
+extern void xwl_trace_put_image(DrawablePtr, const char *, int, int, int, int, int, int)
+    __attribute__((weak));
 
 typedef struct _ShmScrPrivateRec {
     CloseScreenProcPtr CloseScreen;
@@ -531,7 +532,8 @@ ProcShmPutImage(ClientPtr client)
     VALIDATE_DRAWABLE_AND_GC(stuff->drawable, pDraw, DixWriteAccess);
     /* gamenative trace hook: defined by Xwayland only. */
     if (xwl_trace_put_image)
-        xwl_trace_put_image(pDraw, "ShmPutImage");
+        xwl_trace_put_image(pDraw, "ShmPutImage", stuff->dstX, stuff->dstY, stuff->srcWidth,
+                            stuff->srcHeight, stuff->format, stuff->depth);
     VERIFY_SHMPTR(stuff->shmseg, stuff->offset, FALSE, shmdesc, client);
     if ((stuff->sendEvent != xTrue) && (stuff->sendEvent != xFalse))
         return BadValue;

@@ -90,6 +90,10 @@ struct xwl_window {
     Bool allow_commits;
     struct xorg_list window_buffers_available;
     struct xorg_list window_buffers_unavailable;
+    /* gamenative trace: PutImage requests on this window since the last
+     * commit, and the union of their rects. */
+    int gn_puts;
+    BoxRec gn_put_box;
     OsTimerPtr window_buffers_timer;
     struct wl_output *wl_output;
     struct wl_output *wl_output_fullscreen;

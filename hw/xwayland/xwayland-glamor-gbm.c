@@ -1818,8 +1818,8 @@ xwl_glamor_gbm_init_egl(struct xwl_screen *xwl_screen)
 
         if (off && xwl_gbm->implicit_sync) {
             xwl_gbm->implicit_sync = FALSE;
-            LogMessage(X_INFO, "glamor: implicit sync off (gamenative-drm): "
-                       "finishing GPU work before each commit\n");
+            ErrorF("glamor: implicit sync off (gamenative-drm): "
+                   "finishing GPU work before each commit\n");
         }
     }
 #ifdef DRI3
