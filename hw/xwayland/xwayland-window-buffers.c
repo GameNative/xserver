@@ -39,6 +39,8 @@
 #include "dri3.h"
 
 #include <poll.h>
+#include <stdlib.h>
+#include <string.h>
 #ifdef DRI3
 #include <sys/eventfd.h>
 #endif
@@ -54,6 +56,72 @@ struct xwl_window_buffer {
     uint32_t time;
     struct xorg_list link_buffer;
 };
+
+/* gamenative trace (XWAYLAND_GN_TRACE=1): where client drawing lands versus
+ * the window buffers the compositor holds. Each category is limited to 10
+ * lines a second. */
+Bool
+xwl_gn_trace_on(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("XWAYLAND_GN_TRACE");
+
+        on = e && *e && strcmp(e, "0") != 0;
+    }
+    return on;
+}
+
+Bool
+xwl_gn_trace_rate(int *count, CARD32 *second)
+{
+    CARD32 now = GetTimeInMillis() / 1000;
+
+    if (now != *second) {
+        *second = now;
+        *count = 0;
+    }
+    return (*count)++ < 10;
+}
+
+static int
+xwl_gn_count(struct xorg_list *list)
+{
+    struct xwl_window_buffer *b;
+    int n = 0;
+
+    xorg_list_for_each_entry(b, list, link_buffer)
+        n++;
+    return n;
+}
+
+/* Called from ProcPutImage / ProcShmPutImage (weak symbol there). */
+void
+xwl_trace_put_image(DrawablePtr drawable, const char *what)
+{
+    static int count;
+    static CARD32 second;
+    struct xwl_window *xwl_window;
+    struct xwl_window_buffer *b;
+    PixmapPtr pixmap;
+    Bool held = FALSE;
+
+    if (!xwl_gn_trace_on() || drawable->type != DRAWABLE_WINDOW)
+        return;
+    xwl_window = xwl_window_from_window((WindowPtr) drawable);
+    if (!xwl_window || !xwl_gn_trace_rate(&count, &second))
+        return;
+    pixmap = (*drawable->pScreen->GetWindowPixmap) ((WindowPtr) drawable);
+    xorg_list_for_each_entry(b, &xwl_window->window_buffers_unavailable, link_buffer)
+        if (b->pixmap == pixmap)
+            held = TRUE;
+    ErrorF("gn-trace: %s win=0x%x target_pixmap=%p held_by_compositor=%d "
+           "buffers available=%d unavailable=%d\n", what,
+           (unsigned) ((WindowPtr) drawable)->drawable.id, (void *) pixmap, held,
+           xwl_gn_count(&xwl_window->window_buffers_available),
+           xwl_gn_count(&xwl_window->window_buffers_unavailable));
+}
 
 static void
 copy_pixmap_area(PixmapPtr src_pixmap, PixmapPtr dst_pixmap,
@@ -405,6 +473,26 @@ xwl_window_swap_pixmap(struct xwl_window *xwl_window, Bool handle_sync)
     xwl_window_buffer_add_damage_region(xwl_window);
 
     xwl_window_buffer = xwl_window_buffer_get_available(xwl_window);
+    if (xwl_gn_trace_on()) {
+        static int count;
+        static CARD32 second;
+
+        if (xwl_gn_trace_rate(&count, &second)) {
+            RegionPtr dmg = xwl_window_buffer ? xwl_window_buffer->damage_region : NULL;
+            BoxPtr ext = dmg ? RegionExtents(dmg) : NULL;
+
+            ErrorF("gn-trace: swap committed=%p next=%p (%s) copy_boxes=%d "
+                   "extent=%d,%d-%d,%d available=%d unavailable=%d\n",
+                   (void *) window_pixmap,
+                   xwl_window_buffer ? (void *) xwl_window_buffer->pixmap : NULL,
+                   xwl_window_buffer ? "reused" : "new alloc",
+                   dmg ? RegionNumRects(dmg) : 0,
+                   ext ? ext->x1 : 0, ext ? ext->y1 : 0,
+                   ext ? ext->x2 : 0, ext ? ext->y2 : 0,
+                   xwl_gn_count(&xwl_window->window_buffers_available),
+                   xwl_gn_count(&xwl_window->window_buffers_unavailable));
+        }
+    }
     if (xwl_window_buffer) {
         RegionPtr full_damage = xwl_window_buffer->damage_region;
         BoxPtr pBox = RegionRects(full_damage);

@@ -38,4 +38,9 @@ void xwl_window_buffers_dispose(struct xwl_window *xwl_window, Bool force);
 void xwl_window_realloc_pixmap(struct xwl_window *xwl_window);
 PixmapPtr xwl_window_swap_pixmap(struct xwl_window *xwl_window, Bool handle_sync);
 
+/* gamenative trace (XWAYLAND_GN_TRACE=1) */
+Bool xwl_gn_trace_on(void);
+Bool xwl_gn_trace_rate(int *count, CARD32 *second);
+void xwl_trace_put_image(DrawablePtr drawable, const char *what);
+
 #endif /* XWAYLAND_WINDOW_BUFFERS_H */

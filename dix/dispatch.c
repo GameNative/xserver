@@ -134,6 +134,9 @@ Equipment Corporation.
 #include "probes.h"
 #endif
 
+/* gamenative trace hook (Xwayland defines it; weak elsewhere). */
+extern void xwl_trace_put_image(DrawablePtr, const char *) __attribute__((weak));
+
 #define mskcnt ((MAXCLIENTS + 31) / 32)
 #define BITMASK(i) (1U << ((i) & 31))
 #define MASKIDX(i) ((i) >> 5)
@@ -2090,6 +2093,9 @@ ProcPutImage(ClientPtr client)
 
     REQUEST_AT_LEAST_SIZE(xPutImageReq);
     VALIDATE_DRAWABLE_AND_GC(stuff->drawable, pDraw, DixWriteAccess);
+    /* gamenative trace hook: defined by Xwayland only. */
+    if (xwl_trace_put_image)
+        xwl_trace_put_image(pDraw, "PutImage");
     if (stuff->format == XYBitmap) {
         if ((stuff->depth != 1) ||
             (stuff->leftPad >= (unsigned int) screenInfo.bitmapScanlinePad))
