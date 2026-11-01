@@ -40,6 +40,7 @@ in this Software without prior written authorization from The Open Group.
 #endif
 #include <unistd.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <X11/X.h>
 #include <X11/Xproto.h>
@@ -448,6 +449,8 @@ gn_shm_attach_server_fd(ShmDescPtr shmdesc, int fd, XID shmseg, int shmid,
 
     if (fstat(fd, &statb) < 0 ||
         (statb.st_size == 0 && (statb.st_size = shm_tmpfile_size(fd)) == 0)) {
+        LogMessageVerb(X_WARNING, 0, "gn: ShmAttach: SysV id %d: server fd %d has no size (fstat %s)\n",
+                       shmid, fd, strerror(errno));
         close(fd);
         return BadAccess;
     }
@@ -456,8 +459,11 @@ gn_shm_attach_server_fd(ShmDescPtr shmdesc, int fd, XID shmseg, int shmid,
                          readOnly ? PROT_READ : PROT_READ | PROT_WRITE,
                          MAP_SHARED, fd, 0);
     close(fd);
-    if (shmdesc->addr == ((char *) -1))
+    if (shmdesc->addr == ((char *) -1)) {
+        LogMessageVerb(X_WARNING, 0, "gn: ShmAttach: SysV id %d: mmap of %lld bytes failed: %s\n",
+                       shmid, (long long) statb.st_size, strerror(errno));
         return BadAccess;
+    }
     shmdesc->shmid = shmid;
     shmdesc->refcnt = 1;
     shmdesc->writable = !readOnly;
@@ -469,8 +475,8 @@ gn_shm_attach_server_fd(ShmDescPtr shmdesc, int fd, XID shmseg, int shmid,
         munmap(shmdesc->addr, shmdesc->size);
         return BadAlloc;
     }
-    LogMessage(X_INFO, "gn: ShmAttach: SysV id %d (%lu bytes) attached via the sysvshm server\n",
-               shmid, shmdesc->size);
+    LogMessageVerb(X_INFO, 0, "gn: ShmAttach: SysV id %d (%lu bytes) attached via the sysvshm server\n",
+                   shmid, shmdesc->size);
     return Success;
 }
 #endif
@@ -511,6 +517,9 @@ ProcShmAttach(ClientPtr client)
         if (shmdesc->addr == ((char *) -1)) {
             int fd = gn_sysvshm_server_fd(stuff->shmid);
 
+            if (fd < 0)
+                LogMessageVerb(X_WARNING, 0, "gn: ShmAttach: SysV id %d unknown here and the sysvshm server returned no fd\n",
+                               stuff->shmid);
             if (fd >= 0) {
                 int rc = gn_shm_attach_server_fd(shmdesc, fd, stuff->shmseg,
                                                  stuff->shmid, stuff->readOnly);
@@ -1277,7 +1286,10 @@ shm_tmpfile_size(int fd)
     sprintf(path, "/proc/self/fd/%d", fd);
 
     int size;
-    if (readlink(path, realpath, sizeof(realpath)) != -1 && !strcmp("/dev/ashmem", realpath))
+    /* Named regions read back as "/dev/ashmem/<name> (deleted)", e.g. the
+     * sysvshm server's "sysvshm-<id>": match the prefix, not the whole path. */
+    if (readlink(path, realpath, sizeof(realpath) - 1) != -1 &&
+        !strncmp("/dev/ashmem", realpath, strlen("/dev/ashmem")))
         return ioctl(fd, /* ASHMEM_GET_SIZE */ _IO(0x77, 4), NULL);
     else
         return 0;
