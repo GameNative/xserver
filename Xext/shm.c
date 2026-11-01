@@ -513,14 +513,19 @@ ProcShmAttach(ClientPtr client)
 #endif
         shmdesc->addr = shmat(stuff->shmid, 0,
                               stuff->readOnly ? SHM_RDONLY : 0);
+        if ((shmdesc->addr == ((char *) -1)) || SHMSTAT(stuff->shmid, &buf)) {
 #if defined(__ANDROID__) && defined(SHM_FD_PASSING)
-        if (shmdesc->addr == ((char *) -1)) {
+            /* The container's libandroid-sysvshm.so shmat() does not return
+             * -1 for an id it does not know (it leaves the return register
+             * untouched), so the failure is only visible at IPC_STAT. Either
+             * way: try the server. */
             int fd = gn_sysvshm_server_fd(stuff->shmid);
 
-            if (fd < 0)
-                LogMessageVerb(X_WARNING, 0, "gn: ShmAttach: SysV id %d unknown here and the sysvshm server returned no fd\n",
-                               stuff->shmid);
-            if (fd >= 0) {
+            if (fd < 0) {
+                LogMessageVerb(X_WARNING, 0, "gn: ShmAttach: SysV id %d unknown here (shmat %p, IPC_STAT failed) and the sysvshm server returned no fd\n",
+                               stuff->shmid, shmdesc->addr);
+            }
+            else {
                 int rc = gn_shm_attach_server_fd(shmdesc, fd, stuff->shmseg,
                                                  stuff->shmid, stuff->readOnly);
 
@@ -534,9 +539,7 @@ ProcShmAttach(ClientPtr client)
                     return BadAlloc;
                 return Success;
             }
-        }
 #endif
-        if ((shmdesc->addr == ((char *) -1)) || SHMSTAT(stuff->shmid, &buf)) {
             free(shmdesc);
             return BadAccess;
         }
