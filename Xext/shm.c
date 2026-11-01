@@ -40,6 +40,7 @@ in this Software without prior written authorization from The Open Group.
 #endif
 #include <unistd.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <X11/X.h>
 #include <X11/Xproto.h>
@@ -369,6 +370,117 @@ shm_access(ClientPtr client, SHMPERM_TYPE * perm, int readonly)
     return (SHMPERM_MODE(perm) & mask) == mask ? 0 : -1;
 }
 
+#if defined(__ANDROID__) && defined(SHM_FD_PASSING)
+#include <sys/socket.h>
+#include <sys/un.h>
+/*
+ * GameNative: the guest's SysV shm is emulated by the app's sysvshm server
+ * (libandroid-sysvshm.so client in every guest process, socket named by
+ * ANDROID_SYSVSHM_SERVER). That client's shmat() only resolves ids the calling
+ * process created itself, so a segment an X client made with shmget() is
+ * unknown in this process and ShmAttach fails with BadAccess. The server does
+ * hand out any segment's fd on request (GET_FD), so fetch it and attach the
+ * segment the way an fd-passed one is attached.
+ */
+#define GN_SYSVSHM_REQUEST_GET_FD 1
+
+static int
+gn_sysvshm_server_fd(int shmid)
+{
+    const char *path = getenv("ANDROID_SYSVSHM_SERVER");
+    struct sockaddr_un addr;
+    unsigned char req[5];
+    char byte = 0;
+    struct iovec iov = { .iov_base = &byte, .iov_len = 1 };
+    union {
+        struct cmsghdr hdr;
+        char buf[CMSG_SPACE(sizeof(int))];
+    } ctrl;
+    struct msghdr msg;
+    struct cmsghdr *cmsg;
+    int sock, fd = -1;
+
+    if (!path || !*path || strlen(path) >= sizeof(addr.sun_path))
+        return -1;
+    sock = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (sock < 0)
+        return -1;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strcpy(addr.sun_path, path);
+    if (connect(sock, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+        close(sock);
+        return -1;
+    }
+    req[0] = GN_SYSVSHM_REQUEST_GET_FD;
+    memcpy(req + 1, &shmid, sizeof(shmid));
+    if (write(sock, req, sizeof(req)) != (ssize_t) sizeof(req)) {
+        close(sock);
+        return -1;
+    }
+    memset(&ctrl, 0, sizeof(ctrl));
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = &ctrl;
+    msg.msg_controllen = sizeof(ctrl);
+    if (recvmsg(sock, &msg, 0) >= 0) {
+        for (cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+                memcpy(&fd, CMSG_DATA(cmsg), sizeof(fd));
+                break;
+            }
+        }
+    }
+    close(sock);
+    return fd;
+}
+
+static int shm_tmpfile_size(int fd);
+static void ShmBusfaultNotify(void *context);
+
+/* Attach a segment whose fd came from the sysvshm server. Mirrors
+ * ProcShmAttachFd from the fstat onwards; takes ownership of fd. */
+static int
+gn_shm_attach_server_fd(ShmDescPtr shmdesc, int fd, XID shmseg, int shmid,
+                        Bool readOnly)
+{
+    struct stat statb;
+
+    if (fstat(fd, &statb) < 0 ||
+        (statb.st_size == 0 && (statb.st_size = shm_tmpfile_size(fd)) == 0)) {
+        LogMessageVerb(X_WARNING, 0, "gn: ShmAttach: SysV id %d: server fd %d has no size (fstat %s)\n",
+                       shmid, fd, strerror(errno));
+        close(fd);
+        return BadAccess;
+    }
+    shmdesc->is_fd = TRUE;
+    shmdesc->addr = mmap(NULL, statb.st_size,
+                         readOnly ? PROT_READ : PROT_READ | PROT_WRITE,
+                         MAP_SHARED, fd, 0);
+    close(fd);
+    if (shmdesc->addr == ((char *) -1)) {
+        LogMessageVerb(X_WARNING, 0, "gn: ShmAttach: SysV id %d: mmap of %lld bytes failed: %s\n",
+                       shmid, (long long) statb.st_size, strerror(errno));
+        return BadAccess;
+    }
+    shmdesc->shmid = shmid;
+    shmdesc->refcnt = 1;
+    shmdesc->writable = !readOnly;
+    shmdesc->size = statb.st_size;
+    shmdesc->resource = shmseg;
+    shmdesc->busfault = busfault_register_mmap(shmdesc->addr, shmdesc->size,
+                                               ShmBusfaultNotify, shmdesc);
+    if (!shmdesc->busfault) {
+        munmap(shmdesc->addr, shmdesc->size);
+        return BadAlloc;
+    }
+    LogMessageVerb(X_INFO, 0, "gn: ShmAttach: SysV id %d (%lu bytes) attached via the sysvshm server\n",
+                   shmid, shmdesc->size);
+    return Success;
+}
+#endif
+
 static int
 ProcShmAttach(ClientPtr client)
 {
@@ -402,6 +514,32 @@ ProcShmAttach(ClientPtr client)
         shmdesc->addr = shmat(stuff->shmid, 0,
                               stuff->readOnly ? SHM_RDONLY : 0);
         if ((shmdesc->addr == ((char *) -1)) || SHMSTAT(stuff->shmid, &buf)) {
+#if defined(__ANDROID__) && defined(SHM_FD_PASSING)
+            /* The container's libandroid-sysvshm.so shmat() does not return
+             * -1 for an id it does not know (it leaves the return register
+             * untouched), so the failure is only visible at IPC_STAT. Either
+             * way: try the server. */
+            int fd = gn_sysvshm_server_fd(stuff->shmid);
+
+            if (fd < 0) {
+                LogMessageVerb(X_WARNING, 0, "gn: ShmAttach: SysV id %d unknown here (shmat %p, IPC_STAT failed) and the sysvshm server returned no fd\n",
+                               stuff->shmid, shmdesc->addr);
+            }
+            else {
+                int rc = gn_shm_attach_server_fd(shmdesc, fd, stuff->shmseg,
+                                                 stuff->shmid, stuff->readOnly);
+
+                if (rc != Success) {
+                    free(shmdesc);
+                    return rc;
+                }
+                shmdesc->next = Shmsegs;
+                Shmsegs = shmdesc;
+                if (!AddResource(stuff->shmseg, ShmSegType, (void *) shmdesc))
+                    return BadAlloc;
+                return Success;
+            }
+#endif
             free(shmdesc);
             return BadAccess;
         }
@@ -1151,7 +1289,10 @@ shm_tmpfile_size(int fd)
     sprintf(path, "/proc/self/fd/%d", fd);
 
     int size;
-    if (readlink(path, realpath, sizeof(realpath)) != -1 && !strcmp("/dev/ashmem", realpath))
+    /* Named regions read back as "/dev/ashmem/<name> (deleted)", e.g. the
+     * sysvshm server's "sysvshm-<id>": match the prefix, not the whole path. */
+    if (readlink(path, realpath, sizeof(realpath) - 1) != -1 &&
+        !strncmp("/dev/ashmem", realpath, strlen("/dev/ashmem")))
         return ioctl(fd, /* ASHMEM_GET_SIZE */ _IO(0x77, 4), NULL);
     else
         return 0;
