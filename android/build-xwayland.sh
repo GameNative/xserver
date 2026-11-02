@@ -99,7 +99,13 @@ if [ -d "$XS_DIR/build-android/meson-info" ]; then
 elif [ -d "$XS_DIR/build-android" ]; then
     rm -rf "$XS_DIR/build-android"
 fi
-meson setup "$XS_DIR/build-android" \
+# Both directories are named rather than relying on the caller's cwd: with one
+# positional argument meson takes the *current* directory as the source tree, and
+# this script is called from other trees (gamescope's package script runs it from
+# the gamescope checkout), where the build dir then gets configured against the
+# wrong source — 'cpp compiler binary not defined', because Xwayland's cross file
+# is C-only and gamescope's meson.build is C++.
+meson setup "$XS_DIR/build-android" "$XS_DIR" \
     --cross-file "$XS_DIR/android/cross/aarch64-linux-android.txt" \
     -Dprefix="$RUNTIME" \
     -Dxvfb=false \
