@@ -808,6 +808,14 @@ xwl_present_check_flip(RRCrtcPtr crtc,
         return FALSE;
 
 #ifdef XWL_HAS_GLAMOR
+    /* Flipping attaches the client's buffer and commits it with no fence of
+     * its own, so it is only safe where the compositor orders its scan-out
+     * after the client's rendering: implicit sync, or an explicit syncobj
+     * wait. Where neither exists -- gamenative-drm, see
+     * xwl_glamor_gbm_init_egl -- this gate is what keeps every Present client
+     * on the copy path, where xwl_window_handle_pixmap_sync() finishes the GPU
+     * before the commit. Allowing a flip there commits unfenced work, and the
+     * frame is scanned out half-written. */
     if (!xwl_glamor_supports_implicit_sync(xwl_window->xwl_screen) &&
         !xwl_window->xwl_screen->explicit_sync)
         return FALSE;

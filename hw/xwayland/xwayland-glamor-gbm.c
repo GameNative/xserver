@@ -1808,7 +1808,9 @@ xwl_glamor_gbm_init_egl(struct xwl_screen *xwl_screen)
      * dma-buf (zink on Turnip/KGSL), and explicit sync is off (no timeline
      * syncobjs on the render node). Nothing orders the compositor's scan-out
      * after glamor's rendering, so treat implicit sync as unsupported: every
-     * commit then waits for the GPU first (xwl_window_handle_pixmap_sync).
+     * commit then waits for the GPU first (xwl_window_handle_pixmap_sync),
+     * and xwl_present_check_flip() stops flipping -- the flip path has no
+     * equivalent wait, so the two go together.
      * XWAYLAND_GN_NO_IMPLICIT_SYNC=0 keeps the old assumption, =1 forces this
      * on any device. */
     {

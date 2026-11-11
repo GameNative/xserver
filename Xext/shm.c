@@ -381,6 +381,13 @@ shm_access(ClientPtr client, SHMPERM_TYPE * perm, int readonly)
  * unknown in this process and ShmAttach fails with BadAccess. The server does
  * hand out any segment's fd on request (GET_FD), so fetch it and attach the
  * segment the way an fd-passed one is attached.
+ *
+ * That path performs no permission check, and there is none to perform: the
+ * server answers whoever connects (SysVSHMRequestHandler reads no caller
+ * identity), and every process in the session runs as the app's uid, so the
+ * SysV permission bits would be uniform. shm_access() could only reject the
+ * ids this process did not create -- which is the very check that makes
+ * ShmAttach fail here.
  */
 #define GN_SYSVSHM_REQUEST_GET_FD 1
 
@@ -515,15 +522,24 @@ ProcShmAttach(ClientPtr client)
                               stuff->readOnly ? SHM_RDONLY : 0);
         if ((shmdesc->addr == ((char *) -1)) || SHMSTAT(stuff->shmid, &buf)) {
 #if defined(__ANDROID__) && defined(SHM_FD_PASSING)
-            /* The container's libandroid-sysvshm.so shmat() does not return
-             * -1 for an id it does not know (it leaves the return register
-             * untouched), so the failure is only visible at IPC_STAT. Either
-             * way: try the server. */
+            /* Every build of libandroid-sysvshm in this tree returns
+             * (void *) -1 for an id it did not create, and bionic has no SysV
+             * IPC at all when the library is not preloaded, so the attach
+             * fails here either way. IPC_STAT is checked too because it is the
+             * same answer by the other route -- the library's shmctl returns
+             * -1 for an unknown id -- and because on that route `addr` may
+             * already hold a successful mapping. Try the server. */
+            char *mapped = shmdesc->addr;
+            if (mapped != ((char *) -1)) {
+                /* Mapped, then failed to stat: that mapping is not the one the
+                 * server path will install, so drop it before it is lost. */
+                shmdt(mapped);
+                shmdesc->addr = (char *) -1;
+            }
             int fd = gn_sysvshm_server_fd(stuff->shmid);
-
             if (fd < 0) {
                 LogMessageVerb(X_WARNING, 0, "gn: ShmAttach: SysV id %d unknown here (shmat %p, IPC_STAT failed) and the sysvshm server returned no fd\n",
-                               stuff->shmid, shmdesc->addr);
+                               stuff->shmid, mapped);
             }
             else {
                 int rc = gn_shm_attach_server_fd(shmdesc, fd, stuff->shmseg,
