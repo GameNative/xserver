@@ -22,6 +22,16 @@ RUNTIME="${GN_XWAYLAND_PREFIX:-/data/user/0/app.gamenative/files/gamescope}"
 NDK="${GN_XWAYLAND_NDK:-$HOME/Android/Sdk/ndk/27.3.13750724}"
 NDK_BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
+# GLX needs the libGL headers, and the termux prefix ships the protocol ones
+# (glxproto.h, glxtokens.h, dri_interface.h) without GL/gl.h, GL/glx.h and
+# GL/glext.h. Name the missing file here rather than let the build fail deep inside
+# glx/createcontext.c.
+for hdr in gl.h glx.h glext.h internal/dri_interface.h; do
+    [ -f "$DEPS/include/GL/$hdr" ] || {
+        echo "error: $DEPS/include/GL/$hdr missing (needed by -Dglx=true)" >&2
+        exit 1; }
+done
+
 # --- cross file ---------------------------------------------------------------
 # android/cross/aarch64-linux-android.txt is generated from the committed .txt.in
 # template and the settings above, so no absolute path is stored in the tree.
@@ -89,8 +99,14 @@ fi
 # Xwayland runs the GPU path instead of shm-only. Gamescope no longer needs its
 # content-override hack for the guest's frames: they reach the X11 window as a
 # real dma-buf through the same device (see
-# gamescope/android/08-xwayland-render-node.md). glx stays off (no GLX
-# clients); the present extension itself is unconditional in this tree.
+# gamescope/android/08-xwayland-render-node.md). The present extension itself is
+# unconditional in this tree.
+#
+# glx is on: a GL guest's libGL presents through GLX, and Mesa's kopper -- the
+# zink path that hands its frames to the Vulkan WSI instead of copying them
+# through XShmPutImage -- lives in the GLX frontend and initialises against the
+# server's GLX extension. With glx off, GL clients fall back to an shm copy and
+# their frames never reach the ICD's swapchain.
 # xkb dirs point at the runtime payload layout; xkeyboard-config data is
 # staged by package-xwayland.sh.
 RECONF=""
@@ -109,7 +125,7 @@ meson setup "$XS_DIR/build-android" "$XS_DIR" \
     --cross-file "$XS_DIR/android/cross/aarch64-linux-android.txt" \
     -Dprefix="$RUNTIME" \
     -Dxvfb=false \
-    -Dglamor=true -Dglx=false -Ddri3=true -Ddrm=true \
+    -Dglamor=true -Dglx=true -Ddri3=true -Ddrm=true \
     -Dlisten_tcp=false \
     -Dlibdecor=false \
     -Dmitshm=true \
